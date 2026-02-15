@@ -20,7 +20,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # 获取类别列表
 import json
 # 数据集目录路径修正 (如果还需要 scan)
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "HWDB1.1", "subset_631")
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "HWDB1.1", "subset_1000")
 # 类别映射文件也在 checkpoints
 CLASS_MAPPING_FILE = os.path.join("checkpoints", "classes.json")
 

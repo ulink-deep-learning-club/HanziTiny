@@ -20,7 +20,7 @@ from model.hanzi_tiny import HanziTiny  # 专用的轻量级汉字识别模型
 
 # ================= 配置区域 =================
 # 数据集在根目录下
-DATA_DIR = os.path.join(root_dir, "HWDB1.1", "subset_631")
+DATA_DIR = os.path.join(root_dir, "HWDB1.1", "subset_1000")
 
 def get_config():
     """根据硬件环境动态获取配置"""
