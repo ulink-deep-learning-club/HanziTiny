@@ -9,6 +9,7 @@ import sys
 import shutil
 from tqdm import tqdm
 import math
+import argparse # 新增
 
 # 添加项目根目录到 sys.path 以便导入 model
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +24,11 @@ DATA_DIR = os.path.join(root_dir, "HWDB1.1", "subset_631")
 
 def get_config():
     """根据硬件环境动态获取配置"""
+    parser = argparse.ArgumentParser(description='HanziTiny Training')
+    parser.add_argument('--epochs', type=int, default=None, help='Number of epochs to train')
+    parser.add_argument('--batch-size', type=int, default=None, help='Batch size')
+    args = parser.parse_args()
+
     config = {}
     
     # HanziTiny 极度轻量，即使在 CPU 上也很快，所以我们可以大胆一点
@@ -40,12 +46,18 @@ def get_config():
         config['batch_size'] = 64
         config['num_workers'] = 0
         config['epochs'] = 5
+    
+    # 如果命令行指定了参数，覆盖默认值
+    if args.epochs is not None:
+        config['epochs'] = args.epochs
+    if args.batch_size is not None:
+        config['batch_size'] = args.batch_size
         
     config['lr'] = 2e-3 # 小模型可以尝试稍大一点的学习率
     config['img_size'] = 64
     
     # === 停止条件 ===
-    config['target_acc'] = 97.0    # 目标准确率：达到多少就停
+    config['target_acc'] = 98.5    # 目标准确率：达到多少就停 (稍微调高一点)
     config['patience'] = 15        # 早停：多少轮验证集不提升就提前结束
     
     return config
@@ -142,7 +154,11 @@ def main():
     checkpoints_dir = os.path.join(root_dir, "checkpoints")
     os.makedirs(checkpoints_dir, exist_ok=True)
     
+    # 类别映射路径
     class_mapping_path = os.path.join(checkpoints_dir, "classes.json")
+    # 状态记录路径 (记录最佳准确率)
+    status_path = os.path.join(checkpoints_dir, "train_status.json")
+    
     with open(class_mapping_path, 'w', encoding='utf-8') as f:
         json.dump(full_dataset_raw.classes, f, ensure_ascii=False)
     print(f"💾 已保存类别映射到 {class_mapping_path}")
@@ -165,25 +181,37 @@ def main():
     model = HanziTiny(num_classes=num_classes).to(device)
 
     # === 断点续训逻辑 ===
-    best_acc = 0.0
-    
-    if os.path.exists(model_path):
-        print(f"🔄 发现上次训练的最佳模型 {model_path}，准备加载...")
-        print(f"🔄 发现上次训练的最佳模型 {model_path}，准备加载...")
-        try:
+    besttry:
             state_dict = torch.load(model_path, map_location=device)
             model.load_state_dict(state_dict)
-            print("✅ 成功加载权重，正在评估当前基准准确率...")
+            print("✅ 成功加载权重")
             
-            # 先跑一遍验证集，获取当前的 best_acc，防止覆盖
-            model.eval()
-            val_correct = 0
-            val_total = 0
-            with torch.no_grad():
-                for imgs, labels in val_loader:
-                    imgs, labels = imgs.to(device), labels.to(device)
-                    outputs = model(imgs)
-                    _, predicted = outputs.max(1)
+            # 优先从 status.json 读取上次的准确率，避免因数据集分割不同导致的各种波动
+            if os.path.exists(status_path):
+                try:
+                    with open(status_path, 'r') as f:
+                        status = json.load(f)
+                        best_acc = status.get('best_acc', 0.0)
+                    print(f"📊 从记录文件读取上次最佳准确率: {best_acc:.2f}%")
+                except:
+                    print("⚠️ 读取 status.json 失败，将重新评估...")
+                    best_acc = 0.0
+            
+            # 如果没有记录或为0，再尝试手动评估 (作为保底)
+            if best_acc == 0:
+                print("⚠️ 未找到准确率记录，正在重新评估当前验证集基准...")
+                model.eval()
+                val_correct = 0
+                val_total = 0
+                with torch.no_grad():
+                    for imgs, labels in val_loader:
+                        imgs, labels = imgs.to(device), labels.to(device)
+                        outputs = model(imgs)
+                        _, predicted = outputs.max(1)
+                        val_total += labels.size(0)
+                        val_correct += predicted.eq(labels).sum().item()
+                best_acc = 100. * val_correct / val_total
+                print(f"📊 当前模型基准准确率: {best_acc:.2f}%
                     val_total += labels.size(0)
                     val_correct += predicted.eq(labels).sum().item()
             best_acc = 100. * val_correct / val_total
@@ -234,13 +262,19 @@ def main():
         with torch.no_grad():
             for imgs, labels in val_loader:
                 imgs, labels = imgs.to(device), labels.to(device)
-                outputs = model(imgs)
-                _, predicted = outputs.max(1)
-                val_total += labels.size(0)
-                val_correct += predicted.eq(labels).sum().item()
-        
-        val_acc = 100. * val_correct / val_total
-        print(f"   -> 验证集准确率: {val_acc:.2f}% (最佳: {best_acc:.2f}%)")
+                # 保存状态
+                with open(status_path, 'w') as f:
+                    json.dump({'best_acc': val_acc}, f)
+            break
+
+        # 2. 保存最佳模型与早停计数
+        if val_acc > best_acc:
+            best_acc = val_acc
+            no_improve_epochs = 0 # 重置计数器
+            torch.save(model.state_dict(), model_path)
+            # 保存状态
+            with open(status_path, 'w') as f:
+                json.dump({'best_acc': val_acc}, fst_acc:.2f}%)")
         # 1. 达到目标准确率提前停止
         if val_acc >= config['target_acc']:
             print(f"\n🎯 恭喜！模型已达到目标准确率 {config['target_acc']}%，提前结束训练！")
