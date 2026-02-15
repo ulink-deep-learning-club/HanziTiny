@@ -31,7 +31,21 @@ def load_classes():
             with open(CLASS_MAPPING_FILE, 'r', encoding='utf-8') as f:
                 classes = json.load(f)
             print(f"✅ 从 {CLASS_MAPPING_FILE} 加载了 {len(classes)} 个类别 (最可靠)。")
-            return classes
+            
+            # === [修复] 如果类别是 #Uxxxx 格式，尝试转回汉字 ===
+            decoded_classes = []
+            for c in classes:
+                if c.startswith("#U"):
+                    try:
+                        # #U4e00 -> 0x4e00 -> '一'
+                        decoded_classes.append(chr(int(c[2:], 16)))
+                    except:
+                        decoded_classes.append(c)
+                else:
+                    decoded_classes.append(c)
+            return decoded_classes
+            # ==================================================
+
         except Exception as e:
             print(f"⚠️ 读取 {CLASS_MAPPING_FILE} 失败: {e}")
 
