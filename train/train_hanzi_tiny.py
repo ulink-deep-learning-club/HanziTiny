@@ -53,7 +53,7 @@ def get_config():
     if args.batch_size is not None:
         config['batch_size'] = args.batch_size
         
-    config['lr'] = 2e-3 # 小模型可以尝试稍大一点的学习率
+    config['lr'] = 1e-6 # 小模型可以尝试稍大一点的学习率
     config['img_size'] = 64
     
     # === 停止条件 ===
