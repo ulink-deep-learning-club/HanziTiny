@@ -165,10 +165,10 @@ def main():
     model = HanziTiny(num_classes=num_classes).to(device)
 
     # === 断点续训逻辑 ===
-    model_path = "best_hanzi_tiny.pth"
     best_acc = 0.0
     
     if os.path.exists(model_path):
+        print(f"🔄 发现上次训练的最佳模型 {model_path}，准备加载...")
         print(f"🔄 发现上次训练的最佳模型 {model_path}，准备加载...")
         try:
             state_dict = torch.load(model_path, map_location=device)
@@ -245,15 +245,15 @@ def main():
         if val_acc >= config['target_acc']:
             print(f"\n🎯 恭喜！模型已达到目标准确率 {config['target_acc']}%，提前结束训练！")
             if val_acc > best_acc:
-                torch.save(model.state_dict(), "best_hanzi_tiny.pth")
+                torch.save(model.state_dict(), model_path)
             break
 
         # 2. 保存最佳模型与早停计数
         if val_acc > best_acc:
             best_acc = val_acc
             no_improve_epochs = 0 # 重置计数器
-            torch.save(model.state_dict(), "best_hanzi_tiny.pth")
-            print("   💾 保存最佳模型")
+            torch.save(model.state_dict(), model_path)
+            print(f"   💾 保存最佳模型至 {model_path}")
         else:
             no_improve_epochs += 1
             print(f"   ⏳ 性能未提升 ({no_improve_epochs}/{config['patience']})")
