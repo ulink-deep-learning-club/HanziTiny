@@ -38,7 +38,7 @@ def get_config():
     if torch.cuda.is_available():
         vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
         if vram_gb > 8: 
-            config['batch_size'] = 512
+            config['batch_size'] = 256
             config['num_workers'] = 8
             config['epochs'] = 200 # SGD 需要更多的轮次来收敛
         else: 
