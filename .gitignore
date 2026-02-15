@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Dataset (Too large for git)
+HWDB1.1/
+data/
+datasets/
+
+# VS Code
+.vscode/
+
+# Environment
+.env
+venv/
+env/
+
+# OS specific
+.DS_Store
+Thumbs.db

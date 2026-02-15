@@ -1,0 +1,270 @@
+#coding=utf-8
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split, Dataset
+from torchvision import datasets, transforms
+import os
+import sys
+import shutil
+from tqdm import tqdm
+import math
+
+# 添加项目根目录到 sys.path 以便导入 model
+current_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(current_dir)
+sys.path.append(root_dir)
+
+from model.hanzi_tiny import HanziTiny  # 专用的轻量级汉字识别模型
+
+# ================= 配置区域 =================
+# 数据集在根目录下
+DATA_DIR = os.path.join(root_dir, "HWDB1.1", "subset_631")
+
+def get_config():
+    """根据硬件环境动态获取配置"""
+    config = {}
+    
+    # HanziTiny 极度轻量，即使在 CPU 上也很快，所以我们可以大胆一点
+    if torch.cuda.is_available():
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        if vram_gb > 8: 
+            config['batch_size'] = 512
+            config['num_workers'] = 8
+            config['epochs'] = 100 # 小模型收敛可能需要多一点 epoch 慢慢磨，反正跑得快
+        else: 
+            config['batch_size'] = 256 # 6G 显存跑这个模型绰绰有余
+            config['num_workers'] = 4
+            config['epochs'] = 50
+    else:
+        config['batch_size'] = 64
+        config['num_workers'] = 0
+        config['epochs'] = 5
+        
+    config['lr'] = 2e-3 # 小模型可以尝试稍大一点的学习率
+    config['img_size'] = 64
+    
+    # === 停止条件 ===
+    config['target_acc'] = 97.0    # 目标准确率：达到多少就停
+    config['patience'] = 15        # 早停：多少轮验证集不提升就提前结束
+    
+    return config
+
+# ================= 数据集工具 =================
+
+class TransformSubset(Dataset):
+    def __init__(self, subset, transform=None):
+        self.subset = subset
+        self.transform = transform
+    def __getitem__(self, index):
+        x, y = self.subset[index]
+        if self.transform:
+            x = self.transform(x)
+        return x, y
+    def __len__(self):
+        return len(self.subset)
+
+def validate_and_cleanup_data_dir(data_dir):
+    """ 清理空文件夹，避免 ImageFolder 报错 """
+    if not os.path.exists(data_dir):
+        return
+    
+    removed_count = 0
+    valid_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.ppm', '.pgm', '.tif', '.tiff', '.webp'}
+    subdirs = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
+    
+    for class_name in subdirs:
+        class_path = os.path.join(data_dir, class_name)
+        has_valid_file = False
+        for f in os.listdir(class_path):
+            if os.path.splitext(f)[1].lower() in valid_exts:
+                has_valid_file = True
+                break
+        
+        if not has_valid_file:
+            print(f"⚠️  类别 '{class_name}' 为空，移除...")
+            try:
+                shutil.rmtree(class_path)
+                removed_count += 1
+            except Exception as e:
+                print(f"❌ 移除失败: {e}")
+                
+    if removed_count > 0:
+        print(f"✅ 已清理 {removed_count} 个空类别。")
+
+def safe_pil_loader(path):
+    from PIL import Image
+    try:
+        with open(path, 'rb') as f:
+            img = Image.open(f)
+            return img.convert('L')
+    except Exception as e:
+        print(f"无法读取 {path}: {e}")
+        return Image.new('L', (64, 64), color=0)
+
+# ================= 主程序 =================
+
+def main():
+    config = get_config()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"🚀 启动 HanziTiny 训练 | 设备: {device} | Batch: {config['batch_size']}")
+
+    # 数据增强
+    train_transform = transforms.Compose([
+        transforms.Resize((config['img_size'], config['img_size'])),
+        transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.8, 1.2)), 
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5], std=[0.5]),
+        transforms.RandomErasing(p=0.2, scale=(0.02, 0.1)) 
+    ])
+
+    val_transform = transforms.Compose([
+        transforms.Resize((config['img_size'], config['img_size'])),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5], std=[0.5])
+    ])
+
+    # 加载数据
+    if not os.path.exists(DATA_DIR):
+        print(f"❌ 错误: 找不到数据集 {DATA_DIR}")
+        return
+
+    validate_and_cleanup_data_dir(DATA_DIR)
+    
+    print("正在加载数据集索引...")
+    full_dataset_raw = datasets.ImageFolder(root=DATA_DIR, loader=safe_pil_loader)
+    num_classes = len(full_dataset_raw.classes)
+    print(f"✅ 类别数: {num_classes}")
+
+    # === 关键：保存类别映射，确保 GUI 预测时索引一致 ===
+    import json
+    # 保存到 checkpoints 文件夹
+    checkpoints_dir = os.path.join(root_dir, "checkpoints")
+    os.makedirs(checkpoints_dir, exist_ok=True)
+    
+    class_mapping_path = os.path.join(checkpoints_dir, "classes.json")
+    with open(class_mapping_path, 'w', encoding='utf-8') as f:
+        json.dump(full_dataset_raw.classes, f, ensure_ascii=False)
+    print(f"💾 已保存类别映射到 {class_mapping_path}")
+
+    train_size = int(0.85 * len(full_dataset_raw)) # 小模型不容易过拟合，可以多给点训练集
+    val_size = len(full_dataset_raw) - train_size
+    train_subset, val_subset = random_split(full_dataset_raw, [train_size, val_size])
+    
+    train_dataset = TransformSubset(train_subset, transform=train_transform)
+    val_dataset = TransformSubset(val_subset, transform=val_transform)
+
+    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, 
+                              num_workers=config['num_workers'], pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, 
+                            num_workers=config['num_workers'], pin_memory=True)
+
+    # 初始化模型
+    # 模型路径在 checkpoints
+    model_path = os.path.join(checkpoints_dir, "best_hanzi_tiny.pth")
+    model = HanziTiny(num_classes=num_classes).to(device)
+
+    # === 断点续训逻辑 ===
+    model_path = "best_hanzi_tiny.pth"
+    best_acc = 0.0
+    
+    if os.path.exists(model_path):
+        print(f"🔄 发现上次训练的最佳模型 {model_path}，准备加载...")
+        try:
+            state_dict = torch.load(model_path, map_location=device)
+            model.load_state_dict(state_dict)
+            print("✅ 成功加载权重，正在评估当前基准准确率...")
+            
+            # 先跑一遍验证集，获取当前的 best_acc，防止覆盖
+            model.eval()
+            val_correct = 0
+            val_total = 0
+            with torch.no_grad():
+                for imgs, labels in val_loader:
+                    imgs, labels = imgs.to(device), labels.to(device)
+                    outputs = model(imgs)
+                    _, predicted = outputs.max(1)
+                    val_total += labels.size(0)
+                    val_correct += predicted.eq(labels).sum().item()
+            best_acc = 100. * val_correct / val_total
+            print(f"📊 当前模型基准准确率: {best_acc:.2f}%，将在此基础上继续微调！")
+            
+            # 续训时，建议把学习率调小一点，防止震荡
+            config['lr'] = config['lr'] * 0.5 
+            print(f"📉 续训模式：学习率已自动减半为 {config['lr']}")
+            
+        except Exception as e:
+            print(f"⚠️ 模型加载失败 ({e})，将从头开始训练。")
+            best_acc = 0.0
+
+    criterion = nn.CrossEntropyLoss()
+    no_improve_epochs = 0 # 记录多少轮没提升
+    # 使用 AdamW，稍微给点 weight_decay
+    optimizer = optim.AdamW(model.parameters(), lr=config['lr'], weight_decay=1e-2)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['epochs'])
+
+    # best_acc = 0.0 # 移除了这一行，因为上面可能已经初始化了
+    
+    for epoch in range(config['epochs']):
+        model.train()
+        correct = 0
+        total = 0
+        loop = tqdm(train_loader, desc=f"Ep [{epoch+1}/{config['epochs']}]")
+        
+        for imgs, labels in loop:
+            imgs, labels = imgs.to(device), labels.to(device)
+            
+            optimizer.zero_grad()
+            outputs = model(imgs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            
+            _, predicted = outputs.max(1)
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
+            loop.set_postfix(acc=f"{100.*correct/total:.1f}%", loss=f"{loss.item():.3f}")
+            
+        scheduler.step()
+        
+        # 验证
+        model.eval()
+        val_correct = 0
+        val_total = 0
+        with torch.no_grad():
+            for imgs, labels in val_loader:
+                imgs, labels = imgs.to(device), labels.to(device)
+                outputs = model(imgs)
+                _, predicted = outputs.max(1)
+                val_total += labels.size(0)
+                val_correct += predicted.eq(labels).sum().item()
+        
+        val_acc = 100. * val_correct / val_total
+        print(f"   -> 验证集准确率: {val_acc:.2f}% (最佳: {best_acc:.2f}%)")
+        # 1. 达到目标准确率提前停止
+        if val_acc >= config['target_acc']:
+            print(f"\n🎯 恭喜！模型已达到目标准确率 {config['target_acc']}%，提前结束训练！")
+            if val_acc > best_acc:
+                torch.save(model.state_dict(), "best_hanzi_tiny.pth")
+            break
+
+        # 2. 保存最佳模型与早停计数
+        if val_acc > best_acc:
+            best_acc = val_acc
+            no_improve_epochs = 0 # 重置计数器
+            torch.save(model.state_dict(), "best_hanzi_tiny.pth")
+            print("   💾 保存最佳模型")
+        else:
+            no_improve_epochs += 1
+            print(f"   ⏳ 性能未提升 ({no_improve_epochs}/{config['patience']})")
+        
+        # 3. 触发早停
+        if no_improve_epochs >= config['patience']:
+            print(f"\n🛑 早停触发：验证集准确率连续 {config['patience']} 轮未提升。")
+            print(f"   当前最佳: {best_acc:.2f}%")
+            break
+
+    print("\n训练结束。")
+
+if __name__ == '__main__':
+    main()
