@@ -27,9 +27,6 @@ def get_config():
     parser = argparse.ArgumentParser(description='HanziTiny Training')
     parser.add_argument('--epochs', type=int, default=None, help='Number of epochs to train')
     parser.add_argument('--batch-size', type=int, default=None, help='Batch size')
-    parser.add_argument('--patience', type=int, default=50, help='Early stopping patience')
-    parser.add_argument('--optimizer', type=str, default='sgd', choices=['adamw', 'sgd'], help='Optimizer (sgd or adamw)')
-    parser.add_argument('--lr', type=float, default=None, help='Learning rate')
     args = parser.parse_args()
 
     config = {}
@@ -38,13 +35,13 @@ def get_config():
     if torch.cuda.is_available():
         vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
         if vram_gb > 8: 
-            config['batch_size'] = 256
+            config['batch_size'] = 512
             config['num_workers'] = 8
-            config['epochs'] = 200 # SGD 需要更多的轮次来收敛
+            config['epochs'] = 100 # 小模型收敛可能需要多一点 epoch 慢慢磨，反正跑得快
         else: 
-            config['batch_size'] = 256
+            config['batch_size'] = 256 # 6G 显存跑这个模型绰绰有余
             config['num_workers'] = 4
-            config['epochs'] = 150
+            config['epochs'] = 50
     else:
         config['batch_size'] = 64
         config['num_workers'] = 0
@@ -55,25 +52,13 @@ def get_config():
         config['epochs'] = args.epochs
     if args.batch_size is not None:
         config['batch_size'] = args.batch_size
-    
-    # 优化器配置
-    config['optimizer'] = args.optimizer
-    config['patience'] = args.patience
-    
-    # 学习率调整: SGD 通常需要比 Adam 大得多的 LR
-    if args.lr is not None:
-        config['lr'] = args.lr
-    else:
-        # 默认 LR
-        if config['optimizer'] == 'sgd':
-            config['lr'] = 0.1  # SGD 初始学习率通常较大 (0.1 ~ 0.05)
-        else:
-            config['lr'] = 2e-3 # AdamW
-            
+        
+    config['lr'] = 2e-3 # 小模型可以尝试稍大一点的学习率
     config['img_size'] = 64
     
     # === 停止条件 ===
-    config['target_acc'] = 98.5    # 目标准确率
+    config['target_acc'] = 98.5    # 目标准确率：达到多少就停 (稍微调高一点)
+    config['patience'] = 15        # 早停：多少轮验证集不提升就提前结束
     
     return config
 
@@ -235,7 +220,6 @@ def main():
                 print(f"📊 继承历史最佳准确率: {best_acc:.2f}%")
             
             # 续训时，建议把学习率调小一点，防止震荡
-            # 对于 SGD，如果是续训，可能不需要减半那么激进，或者从一个小一点的值开始
             config['lr'] = config['lr'] * 0.5 
             print(f"📉 续训模式：学习率已自动减半为 {config['lr']}")
             
@@ -245,19 +229,12 @@ def main():
 
     criterion = nn.CrossEntropyLoss()
     no_improve_epochs = 0 # 记录多少轮没提升
-    
-    # === 优化器选择 ===
-    print(f"🔧 使用优化器: {config['optimizer'].upper()} | LR: {config['lr']}")
-    if config['optimizer'] == 'sgd':
-        # SGD + Momentum 是 CNN 刷分的标配
-        # nesterov=True 有时能加速收敛
-        optimizer = optim.SGD(model.parameters(), lr=config['lr'], momentum=0.9, weight_decay=5e-4, nesterov=True)
-    else:
-        # AdamW
-        optimizer = optim.AdamW(model.parameters(), lr=config['lr'], weight_decay=1e-2)
-    
+    # 使用 AdamW，稍微给点 weight_decay
+    optimizer = optim.AdamW(model.parameters(), lr=config['lr'], weight_decay=1e-2)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['epochs'])
 
+    # best_acc = 0.0 # 移除了这一行，因为上面可能已经初始化了
+    
     for epoch in range(config['epochs']):
         model.train()
         correct = 0
