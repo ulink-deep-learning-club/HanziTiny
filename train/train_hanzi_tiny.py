@@ -181,7 +181,11 @@ def main():
     model = HanziTiny(num_classes=num_classes).to(device)
 
     # === 断点续训逻辑 ===
-    besttry:
+    best_acc = 0.0
+    
+    if os.path.exists(model_path):
+        print(f"🔄 发现上次训练的最佳模型 {model_path}，准备加载...")
+        try:
             state_dict = torch.load(model_path, map_location=device)
             model.load_state_dict(state_dict)
             print("✅ 成功加载权重")
@@ -211,11 +215,9 @@ def main():
                         val_total += labels.size(0)
                         val_correct += predicted.eq(labels).sum().item()
                 best_acc = 100. * val_correct / val_total
-                print(f"📊 当前模型基准准确率: {best_acc:.2f}%
-                    val_total += labels.size(0)
-                    val_correct += predicted.eq(labels).sum().item()
-            best_acc = 100. * val_correct / val_total
-            print(f"📊 当前模型基准准确率: {best_acc:.2f}%，将在此基础上继续微调！")
+                print(f"📊 当前模型基准准确率: {best_acc:.2f}%")
+            else:
+                print(f"📊 继承历史最佳准确率: {best_acc:.2f}%")
             
             # 续训时，建议把学习率调小一点，防止震荡
             config['lr'] = config['lr'] * 0.5 
@@ -262,7 +264,19 @@ def main():
         with torch.no_grad():
             for imgs, labels in val_loader:
                 imgs, labels = imgs.to(device), labels.to(device)
-                # 保存状态
+                outputs = model(imgs)
+                _, predicted = outputs.max(1)
+                val_total += labels.size(0)
+                val_correct += predicted.eq(labels).sum().item()
+        
+        val_acc = 100. * val_correct / val_total
+        print(f"   -> 验证集准确率: {val_acc:.2f}% (最佳: {best_acc:.2f}%)")
+
+        # 1. 达到目标准确率提前停止
+        if val_acc >= config['target_acc']:
+            print(f"\n🎯 恭喜！模型已达到目标准确率 {config['target_acc']}%，提前结束训练！")
+            if val_acc > best_acc:
+                torch.save(model.state_dict(), model_path)
                 with open(status_path, 'w') as f:
                     json.dump({'best_acc': val_acc}, f)
             break
@@ -274,19 +288,7 @@ def main():
             torch.save(model.state_dict(), model_path)
             # 保存状态
             with open(status_path, 'w') as f:
-                json.dump({'best_acc': val_acc}, fst_acc:.2f}%)")
-        # 1. 达到目标准确率提前停止
-        if val_acc >= config['target_acc']:
-            print(f"\n🎯 恭喜！模型已达到目标准确率 {config['target_acc']}%，提前结束训练！")
-            if val_acc > best_acc:
-                torch.save(model.state_dict(), model_path)
-            break
-
-        # 2. 保存最佳模型与早停计数
-        if val_acc > best_acc:
-            best_acc = val_acc
-            no_improve_epochs = 0 # 重置计数器
-            torch.save(model.state_dict(), model_path)
+                json.dump({'best_acc': val_acc}, f)
             print(f"   💾 保存最佳模型至 {model_path}")
         else:
             no_improve_epochs += 1
